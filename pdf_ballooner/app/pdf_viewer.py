@@ -6,7 +6,7 @@ from typing import Optional
 
 import fitz  # PyMuPDF
 from PyQt6.QtCore import pyqtSignal, Qt, QPointF, QRectF
-from PyQt6.QtGui import QImage, QPixmap, QTransform, QWheelEvent, QKeyEvent
+from PyQt6.QtGui import QImage, QPainter, QPixmap, QTransform, QWheelEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
 )
@@ -42,9 +42,10 @@ class PDFViewer(QGraphicsView):
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
 
-        self.setRenderHint(self.renderHints() |
-                           self.RenderHint.Antialiasing |
-                           self.RenderHint.SmoothPixmapTransform)
+        self.setRenderHints(
+            QPainter.RenderHint.Antialiasing |
+            QPainter.RenderHint.SmoothPixmapTransform
+        )
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
