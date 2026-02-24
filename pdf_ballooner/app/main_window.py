@@ -18,7 +18,7 @@ from app.balloon import BalloonData
 from app.balloon_table import BalloonTableWidget
 from app.gdt_panel import GDTPanelWidget
 from app.pdf_viewer import PDFViewer, ViewMode
-from app.exporter import export_pdf, export_csv
+from app.exporter import export_pdf, export_csv, export_excel
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +139,10 @@ class MainWindow(QMainWindow):
         self._act_csv = QAction("Export Balloon &List (CSV)…", self)
         self._act_csv.triggered.connect(self.export_csv)
         file_menu.addAction(self._act_csv)
+
+        self._act_excel = QAction("Export &Inspection Sheet (Excel)…", self)
+        self._act_excel.triggered.connect(self.export_excel_sheet)
+        file_menu.addAction(self._act_excel)
 
         self._act_save_session = QAction("Save &Session…", self, shortcut="Ctrl+Shift+S")
         self._act_save_session.triggered.connect(self.save_session)
@@ -364,6 +368,23 @@ class MainWindow(QMainWindow):
             return
         try:
             export_csv(path, list(self._balloons.values()))
+            QMessageBox.information(self, "Done", f"Saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def export_excel_sheet(self):
+        if not self._balloons:
+            QMessageBox.information(self, "No Balloons", "No balloons to export.")
+            return
+        default = str(Path(self._pdf_path).with_suffix(".xlsx")) if self._pdf_path else "inspection.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Inspection Sheet", default, "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            drawing_name = Path(self._pdf_path).stem if self._pdf_path else ""
+            export_excel(path, list(self._balloons.values()), drawing_name)
             QMessageBox.information(self, "Done", f"Saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
