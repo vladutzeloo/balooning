@@ -193,9 +193,9 @@ class BalloonItem(QGraphicsItem):
             leader_color = QColor("red")
             draw_leader = True
         elif style == "no_arrow":
-            circle_fill = QColor("red")
+            circle_fill = QColor("white")
             circle_border = QColor("red")
-            text_color = QColor("white")
+            text_color = QColor("red")
             leader_color = QColor("red")
             draw_leader = False
         else:  # "default"

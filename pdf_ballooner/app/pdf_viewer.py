@@ -1,4 +1,4 @@
-"""PDF canvas: QGraphicsView that renders PDF pages and handles balloon/GD&T placement."""
+"""PDF canvas: QGraphicsView that renders PDF pages and handles balloon placement."""
 from __future__ import annotations
 
 from enum import Enum, auto
@@ -12,14 +12,12 @@ from PyQt6.QtWidgets import (
 )
 
 from app.balloon import BalloonData, BalloonItem
-from app.gdt import GDTAnnotation, GDTAnnotationItem
 from app.utils import pdf_to_scene, scene_to_pdf
 
 
 class ViewMode(Enum):
     NAVIGATE = auto()
     BALLOON  = auto()
-    GDT      = auto()
 
 
 _BASE_DPI        = 150
@@ -28,19 +26,14 @@ _POINTS_PER_INCH = 72.0
 
 class PDFViewer(QGraphicsView):
     """Displays one PDF page at a time with zoom/pan.  Emits signals for balloon
-    and GD&T placement and passes interactions back to the main window.
+    placement and passes balloon interactions back to the main window.
     """
 
     balloon_requested    = pyqtSignal(QPointF, int)   # pdf_point, page_index
-    balloon_moved        = pyqtSignal(str, QPointF, QPointF)  # uid, new_center(pdf), new_target(pdf)
+    balloon_moved        = pyqtSignal(str, QPointF, QPointF)  # uid, center(pdf), target(pdf)
     balloon_deleted      = pyqtSignal(str)
     balloon_desc_changed = pyqtSignal(str, str)
     balloon_num_changed  = pyqtSignal(str, int)
-
-    gdt_requested        = pyqtSignal(QPointF, int)   # pdf_point, page_index
-    gdt_deleted          = pyqtSignal(str)            # uid
-    gdt_moved            = pyqtSignal(str, QPointF)   # uid, new_position_pdf
-
     page_changed         = pyqtSignal(int, int)       # current, total
     zoom_changed         = pyqtSignal(float)
 
@@ -65,13 +58,10 @@ class PDFViewer(QGraphicsView):
         self._zoom: float = 1.0
         self._page_height: float = 0.0
         self._mode: ViewMode = ViewMode.NAVIGATE
-        self._page_rotations: dict[int, int] = {}  # page_idx -> degrees (0/90/180/270)
+        self._page_rotations: dict[int, int] = {}
 
-        self._balloon_items: dict[str, BalloonItem] = {}       # current page only
-        self._all_balloons: dict[str, BalloonData] = {}        # all pages
-
-        self._gdt_items: dict[str, GDTAnnotationItem] = {}    # current page only
-        self._all_gdts: dict[str, GDTAnnotation] = {}         # all pages
+        self._balloon_items: dict[str, BalloonItem] = {}
+        self._all_balloons: dict[str, BalloonData] = {}
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
 
@@ -83,7 +73,6 @@ class PDFViewer(QGraphicsView):
         self._doc = fitz.open(path)
         self._pdf_path = path
         self._all_balloons.clear()
-        self._all_gdts.clear()
         self._page_rotations.clear()
         self._current_page = 0
         self._zoom = 1.0
@@ -154,7 +143,7 @@ class PDFViewer(QGraphicsView):
         scale_x = view_rect.width()  / rect.width()  if rect.width()  else 1
         scale_y = view_rect.height() / rect.height() if rect.height() else 1
         self._zoom = min(scale_x, scale_y)
-        self._update_item_scales()
+        self._update_balloon_scales()
         self.zoom_changed.emit(self._zoom)
 
     def fit_to_width(self):
@@ -165,12 +154,12 @@ class PDFViewer(QGraphicsView):
         scale = view_rect.width() / rect.width() if rect.width() else 1
         self._apply_zoom(scale)
 
-    # --- Balloon management ---
+    # Balloon management (called by MainWindow)
 
     def add_balloon(self, data: BalloonData):
         self._all_balloons[data.uid] = data
         if data.page == self._current_page:
-            self._add_balloon_item(data)
+            self._add_item(data)
 
     def remove_balloon(self, uid: str):
         self._all_balloons.pop(uid, None)
@@ -206,40 +195,14 @@ class PDFViewer(QGraphicsView):
         self._balloon_items.clear()
         self._all_balloons.clear()
 
-    # --- GD&T annotation management ---
-
-    def add_gdt(self, data: GDTAnnotation):
-        self._all_gdts[data.uid] = data
-        if data.page == self._current_page:
-            self._add_gdt_item(data)
-
-    def remove_gdt(self, uid: str):
-        self._all_gdts.pop(uid, None)
-        item = self._gdt_items.pop(uid, None)
-        if item:
-            self._scene.removeItem(item)
-
-    def update_gdt(self, data: GDTAnnotation):
-        self._all_gdts[data.uid] = data
-        item = self._gdt_items.get(data.uid)
-        if item:
-            item._data = data
-            item.update()
-
     # ------------------------------------------------------------------
     # Internal rendering
     # ------------------------------------------------------------------
 
     def _render_page(self, page_idx: int):
-        # Remove balloon items from scene
         for item in self._balloon_items.values():
             self._scene.removeItem(item)
         self._balloon_items.clear()
-        # Remove GDT items from scene
-        for item in self._gdt_items.values():
-            self._scene.removeItem(item)
-        self._gdt_items.clear()
-
         self._scene.clear()
         self._pixmap_item = None
 
@@ -274,17 +237,11 @@ class PDFViewer(QGraphicsView):
 
         self.setTransform(QTransform().scale(self._zoom, self._zoom))
 
-        # Re-add balloons for this page
         for data in self._all_balloons.values():
             if data.page == page_idx:
-                self._add_balloon_item(data)
+                self._add_item(data)
 
-        # Re-add GDT annotations for this page
-        for data in self._all_gdts.values():
-            if data.page == page_idx:
-                self._add_gdt_item(data)
-
-    def _add_balloon_item(self, data: BalloonData):
+    def _add_item(self, data: BalloonData):
         item = BalloonItem(data, self._page_height, self._zoom)
         item.signals.moved.connect(self._on_balloon_moved)
         item.signals.deleted.connect(self.balloon_deleted)
@@ -292,13 +249,6 @@ class PDFViewer(QGraphicsView):
         item.signals.number_changed.connect(self.balloon_num_changed)
         self._scene.addItem(item)
         self._balloon_items[data.uid] = item
-
-    def _add_gdt_item(self, data: GDTAnnotation):
-        item = GDTAnnotationItem(data, self._page_height, self._zoom)
-        item.signals.deleted.connect(self.gdt_deleted)
-        item.signals.moved.connect(self.gdt_moved)
-        self._scene.addItem(item)
-        self._gdt_items[data.uid] = item
 
     # ------------------------------------------------------------------
     # Zoom helpers
@@ -308,13 +258,11 @@ class PDFViewer(QGraphicsView):
         zoom = max(0.05, min(zoom, 20.0))
         self._zoom = zoom
         self.setTransform(QTransform().scale(zoom, zoom))
-        self._update_item_scales()
+        self._update_balloon_scales()
         self.zoom_changed.emit(zoom)
 
-    def _update_item_scales(self):
+    def _update_balloon_scales(self):
         for item in self._balloon_items.values():
-            item.set_zoom(self._zoom)
-        for item in self._gdt_items.values():
             item.set_zoom(self._zoom)
 
     # ------------------------------------------------------------------
@@ -336,19 +284,15 @@ class PDFViewer(QGraphicsView):
             super().wheelEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._doc is not None:
-            if self._mode == ViewMode.BALLOON:
-                scene_pt = self.mapToScene(event.pos())
-                pdf_pt = scene_to_pdf(scene_pt, self._page_height)
-                self.balloon_requested.emit(pdf_pt, self._current_page)
-                event.accept()
-                return
-            elif self._mode == ViewMode.GDT:
-                scene_pt = self.mapToScene(event.pos())
-                pdf_pt = scene_to_pdf(scene_pt, self._page_height)
-                self.gdt_requested.emit(pdf_pt, self._current_page)
-                event.accept()
-                return
+        if (self._mode == ViewMode.BALLOON and
+                event.button() == Qt.MouseButton.LeftButton and
+                self._doc is not None):
+            # Use position() (QPointF) for sub-pixel accuracy
+            scene_pt = self.mapToScene(event.position().toPoint())
+            pdf_pt = scene_to_pdf(scene_pt, self._page_height)
+            self.balloon_requested.emit(pdf_pt, self._current_page)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -356,6 +300,4 @@ class PDFViewer(QGraphicsView):
             for item in self._scene.selectedItems():
                 if isinstance(item, BalloonItem):
                     self.balloon_deleted.emit(item.uid)
-                elif isinstance(item, GDTAnnotationItem):
-                    self.gdt_deleted.emit(item.uid)
         super().keyPressEvent(event)
