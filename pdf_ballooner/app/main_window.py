@@ -11,6 +11,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QUndoStack, QUndoCommand, QIcon
 from PyQt6.QtWidgets import (
     QMainWindow, QToolBar, QStatusBar, QLabel, QFileDialog,
     QMessageBox, QPushButton, QWidget, QSizePolicy, QSpinBox,
+    QComboBox, QDoubleSpinBox,
 )
 
 from app.balloon import BalloonData
@@ -84,6 +85,11 @@ class MainWindow(QMainWindow):
         self._balloons: dict[str, BalloonData] = {}   # uid -> data
         # For move undo: store position at mouse-press
         self._move_origin: dict[str, tuple[QPointF, QPointF]] = {}
+
+        # Balloon style defaults (applied to newly placed balloons)
+        self._default_style: str = "default"
+        self._default_diameter: float = 20.0
+        self._default_font_size: float = 0.0  # 0 = auto
 
         # -- Central viewer --
         self._viewer = PDFViewer(self)
@@ -159,6 +165,11 @@ class MainWindow(QMainWindow):
                                      triggered=self._viewer.fit_to_page))
         view_menu.addAction(QAction("Fit to &Width", self,
                                      triggered=self._viewer.fit_to_width))
+        view_menu.addSeparator()
+        view_menu.addAction(QAction("Rotate Page &Clockwise", self, shortcut="Ctrl+]",
+                                     triggered=self._viewer.rotate_page_cw))
+        view_menu.addAction(QAction("Rotate Page &Counter-Clockwise", self, shortcut="Ctrl+[",
+                                     triggered=self._viewer.rotate_page_ccw))
 
         # Tools
         tools_menu = mb.addMenu("&Tools")
@@ -202,12 +213,51 @@ class MainWindow(QMainWindow):
         tb.addAction(QAction("►", self, triggered=self._viewer.next_page))
         tb.addSeparator()
 
+        # Rotation buttons
+        tb.addAction(QAction("↻ CW", self, triggered=self._viewer.rotate_page_cw))
+        tb.addAction(QAction("↺ CCW", self, triggered=self._viewer.rotate_page_ccw))
+        tb.addSeparator()
+
         # Mode button
         self._mode_btn = QPushButton("Mode: Navigate")
         self._mode_btn.setCheckable(True)
         self._mode_btn.setFixedWidth(130)
         self._mode_btn.toggled.connect(self._on_mode_btn_toggled)
         tb.addWidget(self._mode_btn)
+
+        # --- Balloon options toolbar ---
+        opt_tb = QToolBar("Balloon Options")
+        opt_tb.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, opt_tb)
+
+        opt_tb.addWidget(QLabel("  Style: "))
+        self._style_combo = QComboBox()
+        self._style_combo.addItems(["Default (white)", "Red circle", "Outline only"])
+        self._style_combo.setFixedWidth(130)
+        self._style_combo.currentIndexChanged.connect(self._on_style_changed)
+        opt_tb.addWidget(self._style_combo)
+
+        opt_tb.addWidget(QLabel("  Size: "))
+        self._size_spin = QDoubleSpinBox()
+        self._size_spin.setRange(6.0, 200.0)
+        self._size_spin.setValue(20.0)
+        self._size_spin.setSingleStep(2.0)
+        self._size_spin.setDecimals(1)
+        self._size_spin.setSuffix(" pt")
+        self._size_spin.setFixedWidth(80)
+        self._size_spin.valueChanged.connect(self._on_size_changed)
+        opt_tb.addWidget(self._size_spin)
+
+        opt_tb.addWidget(QLabel("  Font: "))
+        self._font_spin = QDoubleSpinBox()
+        self._font_spin.setRange(0.0, 100.0)
+        self._font_spin.setValue(0.0)
+        self._font_spin.setSingleStep(1.0)
+        self._font_spin.setDecimals(1)
+        self._font_spin.setSpecialValueText("Auto")
+        self._font_spin.setFixedWidth(80)
+        self._font_spin.valueChanged.connect(self._on_font_size_changed)
+        opt_tb.addWidget(self._font_spin)
 
     # ------------------------------------------------------------------
     # Signal wiring
@@ -366,6 +416,16 @@ class MainWindow(QMainWindow):
     # Signal handlers
     # ------------------------------------------------------------------
 
+    def _on_style_changed(self, idx: int):
+        styles = ["default", "red", "outline"]
+        self._default_style = styles[idx]
+
+    def _on_size_changed(self, value: float):
+        self._default_diameter = value
+
+    def _on_font_size_changed(self, value: float):
+        self._default_font_size = value
+
     def _on_balloon_requested(self, target_pdf: QPointF, page: int):
         # Balloon circle is offset ~50 pts up-right from click
         center_pdf = QPointF(target_pdf.x() + 40, target_pdf.y() + 40)
@@ -374,6 +434,9 @@ class MainWindow(QMainWindow):
             page=page,
             target_point=target_pdf,
             balloon_center=center_pdf,
+            diameter=self._default_diameter,
+            style=self._default_style,
+            font_size_override=self._default_font_size,
         )
         self._next_balloon_number += 1
         cmd = PlaceBalloonCommand(self, data)
