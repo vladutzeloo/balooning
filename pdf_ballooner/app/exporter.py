@@ -4,76 +4,90 @@ from __future__ import annotations
 import csv
 import math
 from pathlib import Path
+from typing import Optional
 
 import fitz  # PyMuPDF
 
 from app.balloon import BalloonData
+from app.gdt import GDTAnnotation
 
 
-def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> None:
-    """Write a new PDF to *dst_path* with balloons drawn as vector overlays.
-
-    The original PDF content is preserved exactly; balloons are added using
-    PyMuPDF's shape API so the output remains searchable and vector-quality.
-    """
+def export_pdf(
+    src_path: str,
+    dst_path: str,
+    balloons: list[BalloonData],
+    gdt_annotations: Optional[list[GDTAnnotation]] = None,
+) -> None:
+    """Write a new PDF to *dst_path* with balloons and GD&T annotations as vector overlays."""
     if Path(src_path).resolve() == Path(dst_path).resolve():
         raise ValueError("Cannot overwrite the original PDF. Choose a different output path.")
 
+    gdt_annotations = gdt_annotations or []
     doc = fitz.open(src_path)
 
     for page_idx in range(len(doc)):
         page = doc[page_idx]
         page_balloons = [b for b in balloons if b.page == page_idx]
-        if not page_balloons:
+        page_gdts     = [a for a in gdt_annotations if a.page == page_idx]
+
+        if not page_balloons and not page_gdts:
             continue
 
-        # PyMuPDF PDF coords: origin bottom-left, Y up (same as our stored PDF coords)
         shape = page.new_shape()
 
+        # --- Balloons ---
         for b in page_balloons:
             tx = b.target_point.x()
             ty = b.target_point.y()
             cx = b.balloon_center.x()
             cy = b.balloon_center.y()
-            r = b.diameter / 2.0
-            style = getattr(b, "style", "default")
+            r  = b.diameter / 2.0
+            style = b.style
 
             # Resolve colours by style
             if style == "red":
-                leader_color = (0.8, 0, 0)
+                leader_color  = (0.8, 0, 0)
                 circle_stroke = (0, 0, 0)
-                circle_fill = (1, 0, 0)
-                text_color = (1, 1, 1)
+                circle_fill   = (1, 0, 0)
+                text_color    = (1, 1, 1)
+                draw_leader   = True
             elif style == "outline":
-                leader_color = (0.8, 0, 0)
+                leader_color  = (0.8, 0, 0)
                 circle_stroke = (0, 0, 0)
-                circle_fill = None  # transparent
-                text_color = (0, 0, 0)
+                circle_fill   = None
+                text_color    = (0, 0, 0)
+                draw_leader   = True
+            elif style == "no_arrow":
+                leader_color  = (0.8, 0, 0)
+                circle_stroke = (0.8, 0, 0)
+                circle_fill   = (0.8, 0, 0)
+                text_color    = (1, 1, 1)
+                draw_leader   = False
             else:  # "default"
-                leader_color = (0.8, 0, 0)
+                leader_color  = (0.8, 0, 0)
                 circle_stroke = (0, 0, 0)
-                circle_fill = (1, 1, 1)
-                text_color = (0, 0, 0)
+                circle_fill   = (1, 1, 1)
+                text_color    = (0, 0, 0)
+                draw_leader   = True
 
             target = fitz.Point(tx, ty)
             center = fitz.Point(cx, cy)
 
-            # --- Leader line ---
-            dx = tx - cx
-            dy = ty - cy
-            dist = math.hypot(dx, dy)
-            if dist > 0:
-                edge = fitz.Point(cx + dx / dist * r, cy + dy / dist * r)
-            else:
-                edge = fitz.Point(cx, cy - r)
+            # --- Leader line + arrowhead ---
+            if draw_leader:
+                dx = tx - cx
+                dy = ty - cy
+                dist = math.hypot(dx, dy)
+                if dist > 0:
+                    edge = fitz.Point(cx + dx / dist * r, cy + dy / dist * r)
+                else:
+                    edge = fitz.Point(cx, cy - r)
 
-            shape.draw_line(edge, target)
-            shape.finish(color=leader_color, width=1.5, stroke_opacity=1.0)
+                shape.draw_line(edge, target)
+                shape.finish(color=leader_color, width=1.5, stroke_opacity=1.0)
+                _draw_arrowhead(shape, edge, target, size=5, color=leader_color)
 
-            # Arrow head at target point
-            _draw_arrowhead(shape, edge, target, size=5, color=leader_color)
-
-            # --- Balloon circle ---
+            # --- Circle ---
             shape.draw_circle(center, r)
             if circle_fill is not None:
                 shape.finish(color=circle_stroke, fill=circle_fill, width=1.5, fill_opacity=1.0)
@@ -81,24 +95,47 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> Non
                 shape.finish(color=circle_stroke, width=1.5, fill_opacity=0.0)
 
             # --- Number label ---
-            font_size_override = getattr(b, "font_size_override", 0.0)
-            if font_size_override > 0:
-                font_size = font_size_override
+            if b.font_size_override > 0:
+                font_size = b.font_size_override
             else:
                 font_size = max(4.0, r * 1.1)
-            text = str(b.number)
+
+            text  = str(b.number)
             est_w = 0.6 * font_size * len(text)
             text_x = cx - est_w / 2
             text_y = cy + font_size * 0.35
             page.insert_text(
                 fitz.Point(text_x, text_y),
                 text,
-                fontname="hebo",
+                fontname="hebo",   # Helvetica Bold
                 fontsize=font_size,
                 color=text_color,
             )
 
         shape.commit()
+
+        # --- GD&T annotations ---
+        for a in page_gdts:
+            ax = a.position.x()
+            ay = a.position.y()
+            fs = a.font_size
+            # Estimate box width
+            w = fs * max(1, len(a.symbol)) * 0.65
+            h = fs
+            # Draw bounding box
+            rect_shape = page.new_shape()
+            box = fitz.Rect(ax - w / 2, ay - h / 2, ax + w / 2, ay + h / 2)
+            rect_shape.draw_rect(box)
+            rect_shape.finish(color=(0.2, 0.2, 0.2), fill=(1, 1, 0.85), width=0.5)
+            rect_shape.commit()
+            # Draw symbol text
+            page.insert_text(
+                fitz.Point(ax - w / 2 + 1, ay + fs * 0.35),
+                a.symbol,
+                fontname="helv",
+                fontsize=fs,
+                color=(0, 0, 0),
+            )
 
     doc.save(dst_path, garbage=4, deflate=True)
     doc.close()

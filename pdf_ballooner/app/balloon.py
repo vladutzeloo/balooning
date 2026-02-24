@@ -10,8 +10,7 @@ from PyQt6.QtGui import (
     QBrush, QColor, QFont, QPen, QPainter, QPolygonF,
 )
 from PyQt6.QtWidgets import (
-    QGraphicsItem, QGraphicsItemGroup, QGraphicsEllipseItem,
-    QGraphicsLineItem, QGraphicsTextItem, QMenu, QInputDialog,
+    QGraphicsItem, QMenu, QInputDialog,
     QGraphicsSceneMouseEvent,
 )
 
@@ -32,8 +31,8 @@ class BalloonData:
     target_point: QPointF         # PDF coords — where the arrow tip points
     balloon_center: QPointF       # PDF coords — centre of the circle
     description: str = ""
-    diameter: float = 20.0        # PDF points
-    style: str = "default"        # "default" | "red" | "outline"
+    diameter: float = 36.0        # PDF points (controls both on-screen & export size)
+    style: str = "default"        # "default" | "red" | "outline" | "no_arrow"
     font_size_override: float = 0.0  # 0 = auto-size based on radius
     uid: str = field(default_factory=make_uid)
 
@@ -58,7 +57,7 @@ class BalloonData:
             target_point=QPointF(*d["target_point"]),
             balloon_center=QPointF(*d["balloon_center"]),
             description=d.get("description", ""),
-            diameter=d.get("diameter", 20.0),
+            diameter=d.get("diameter", 36.0),
             style=d.get("style", "default"),
             font_size_override=d.get("font_size_override", 0.0),
             uid=d["uid"],
@@ -80,8 +79,7 @@ class BalloonSignals(QObject):
 # Graphics item
 # ---------------------------------------------------------------------------
 
-BALLOON_VISUAL_RADIUS_PX = 18   # visual radius in *screen* pixels at zoom=1
-ARROW_HEAD_SIZE = 6              # pixels
+ARROW_HEAD_SIZE = 6  # screen pixels
 
 
 class BalloonItem(QGraphicsItem):
@@ -90,6 +88,9 @@ class BalloonItem(QGraphicsItem):
     The item lives in *scene* coordinates (PDF-point space after Y-flip).
     Its origin is the *balloon centre*.  The target point (arrow tip) is stored
     separately and drawn as an absolute scene position.
+
+    Visual size is driven by ``data.diameter`` so the on-screen balloon
+    matches the size that will be exported to PDF.
     """
 
     def __init__(
@@ -109,8 +110,8 @@ class BalloonItem(QGraphicsItem):
         sc = pdf_to_scene(data.balloon_center, page_height)
         st = pdf_to_scene(data.target_point, page_height)
 
-        self._scene_center = sc     # balloon circle centre in scene space
-        self._scene_target = st     # arrow tip in scene space
+        self._scene_center = sc
+        self._scene_target = st
 
         self.setPos(sc)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -144,7 +145,6 @@ class BalloonItem(QGraphicsItem):
         self._update_scale()
 
     def _update_scale(self):
-        # Scale item so balloon appears the same screen size at every zoom level
         self.setScale(1.0 / self._zoom)
 
     # ------------------------------------------------------------------
@@ -152,12 +152,14 @@ class BalloonItem(QGraphicsItem):
     # ------------------------------------------------------------------
 
     def _radius(self) -> float:
-        """Visual radius in scene points (pre-scale)."""
-        return BALLOON_VISUAL_RADIUS_PX
+        """Radius in local/scene PDF-point units."""
+        return self._data.diameter / 2.0
 
     def boundingRect(self) -> QRectF:
         r = self._radius()
-        # Include the leader line by computing offset to target in local coords
+        if self._data.style == "no_arrow":
+            # No leader line — bounding rect is just the circle
+            return QRectF(-r - 2, -r - 2, 2 * r + 4, 2 * r + 4)
         target_local = self._target_local()
         min_x = min(-r, target_local.x()) - ARROW_HEAD_SIZE
         min_y = min(-r, target_local.y()) - ARROW_HEAD_SIZE
@@ -166,7 +168,6 @@ class BalloonItem(QGraphicsItem):
         return QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
 
     def _target_local(self) -> QPointF:
-        """Target point in this item's local coordinate space."""
         return self._scene_target - self.pos()
 
     # ------------------------------------------------------------------
@@ -176,35 +177,43 @@ class BalloonItem(QGraphicsItem):
     def paint(self, painter: QPainter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self._radius()
-        tl = self._target_local()
         style = self._data.style
 
-        # Resolve colours by style
+        # Resolve colours and flags by style
         if style == "red":
             circle_fill = QColor("red")
             circle_border = QColor("black")
             text_color = QColor("white")
             leader_color = QColor("red")
+            draw_leader = True
         elif style == "outline":
-            circle_fill = Qt.GlobalColor.transparent
+            circle_fill = None  # transparent
             circle_border = QColor("black")
             text_color = QColor("black")
             leader_color = QColor("red")
+            draw_leader = True
+        elif style == "no_arrow":
+            circle_fill = QColor("red")
+            circle_border = QColor("red")
+            text_color = QColor("white")
+            leader_color = QColor("red")
+            draw_leader = False
         else:  # "default"
             circle_fill = QColor("white")
             circle_border = QColor("black")
             text_color = QColor("black")
             leader_color = QColor("red")
+            draw_leader = True
 
-        # --- Leader line ---
-        pen = QPen(leader_color)
-        pen.setWidth(2)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.drawLine(QPointF(0, 0), tl)
-
-        # Arrow head at target
-        self._draw_arrowhead(painter, QPointF(0, 0), tl, leader_color)
+        # --- Leader line + arrowhead ---
+        if draw_leader:
+            tl = self._target_local()
+            pen = QPen(leader_color)
+            pen.setWidth(2)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(0, 0), tl)
+            self._draw_arrowhead(painter, QPointF(0, 0), tl, leader_color)
 
         # --- Circle ---
         if self.isSelected():
@@ -213,7 +222,7 @@ class BalloonItem(QGraphicsItem):
             border_pen = QPen(circle_border, 2)
         border_pen.setCosmetic(True)
         painter.setPen(border_pen)
-        if circle_fill == Qt.GlobalColor.transparent:
+        if circle_fill is None:
             painter.setBrush(Qt.BrushStyle.NoBrush)
         else:
             painter.setBrush(QBrush(circle_fill))
@@ -221,7 +230,7 @@ class BalloonItem(QGraphicsItem):
 
         # --- Number ---
         if self._data.font_size_override > 0:
-            font_size = int(self._data.font_size_override)
+            font_size = max(1, int(self._data.font_size_override))
         else:
             font_size = max(6, int(r * 0.9))
         font = QFont("Arial", font_size)
@@ -260,7 +269,6 @@ class BalloonItem(QGraphicsItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._scene_center = self.pos()
-            # Update stored PDF coords
             from app.utils import scene_to_pdf
             self._data.balloon_center = scene_to_pdf(self.pos(), self._page_height)
             self.signals.moved.emit(
@@ -275,6 +283,7 @@ class BalloonItem(QGraphicsItem):
         delete_action = menu.addAction("Delete balloon")
         edit_number_action = menu.addAction("Edit number")
         edit_desc_action = menu.addAction("Edit description")
+        resize_action = menu.addAction("Resize…")
 
         action = menu.exec(event.screenPos())
         if action == delete_action:
@@ -296,3 +305,12 @@ class BalloonItem(QGraphicsItem):
             if ok:
                 self._data.description = desc
                 self.signals.description_changed.emit(self._data.uid, desc)
+        elif action == resize_action:
+            d, ok = QInputDialog.getDouble(
+                None, "Resize balloon", "Diameter (pt):",
+                self._data.diameter, 4.0, 300.0, 1,
+            )
+            if ok:
+                self.prepareGeometryChange()
+                self._data.diameter = d
+                self.update()
