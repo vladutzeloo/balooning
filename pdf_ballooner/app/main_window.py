@@ -197,6 +197,11 @@ class MainWindow(QMainWindow):
         self._act_bal_mode.triggered.connect(lambda: self._set_mode(ViewMode.BALLOON))
         tools_menu.addAction(self._act_bal_mode)
 
+        self._act_move_mode = QAction("&Move Balloon Mode", self, checkable=True,
+                                       shortcut="M")
+        self._act_move_mode.triggered.connect(lambda: self._set_mode(ViewMode.MOVE))
+        tools_menu.addAction(self._act_move_mode)
+
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar")
         tb.setMovable(False)
@@ -226,11 +231,19 @@ class MainWindow(QMainWindow):
         tb.addAction(QAction("↺ CCW", self, triggered=self._viewer.rotate_page_ccw))
         tb.addSeparator()
 
-        self._mode_btn = QPushButton("Mode: Navigate")
-        self._mode_btn.setCheckable(True)
-        self._mode_btn.setFixedWidth(130)
-        self._mode_btn.toggled.connect(self._on_mode_btn_toggled)
-        tb.addWidget(self._mode_btn)
+        self._btn_balloon = QPushButton("Balloon")
+        self._btn_balloon.setCheckable(True)
+        self._btn_balloon.setFixedWidth(75)
+        self._btn_balloon.setToolTip("Place balloons (B)")
+        self._btn_balloon.toggled.connect(self._on_balloon_btn_toggled)
+        tb.addWidget(self._btn_balloon)
+
+        self._btn_move = QPushButton("Move")
+        self._btn_move.setCheckable(True)
+        self._btn_move.setFixedWidth(65)
+        self._btn_move.setToolTip("Move balloons without renumbering (M)")
+        self._btn_move.toggled.connect(self._on_move_btn_toggled)
+        tb.addWidget(self._btn_move)
 
         # --- Balloon options toolbar ---
         opt_tb = QToolBar("Balloon Options")
@@ -300,14 +313,34 @@ class MainWindow(QMainWindow):
 
     def _set_mode(self, mode: ViewMode):
         self._viewer.set_mode(mode)
-        is_balloon = mode == ViewMode.BALLOON
-        self._mode_btn.setChecked(is_balloon)
-        self._mode_btn.setText("Mode: Balloon" if is_balloon else "Mode: Navigate")
-        self._act_nav_mode.setChecked(not is_balloon)
-        self._act_bal_mode.setChecked(is_balloon)
+        for btn, target in ((self._btn_balloon, ViewMode.BALLOON),
+                            (self._btn_move, ViewMode.MOVE)):
+            btn.blockSignals(True)
+            btn.setChecked(mode == target)
+            btn.blockSignals(False)
+        self._act_nav_mode.setChecked(mode == ViewMode.NAVIGATE)
+        self._act_bal_mode.setChecked(mode == ViewMode.BALLOON)
+        self._act_move_mode.setChecked(mode == ViewMode.MOVE)
 
-    def _on_mode_btn_toggled(self, checked: bool):
-        self._set_mode(ViewMode.BALLOON if checked else ViewMode.NAVIGATE)
+    def _on_balloon_btn_toggled(self, checked: bool):
+        if checked:
+            self._btn_move.blockSignals(True)
+            self._btn_move.setChecked(False)
+            self._btn_move.blockSignals(False)
+        self._viewer.set_mode(ViewMode.BALLOON if checked else ViewMode.NAVIGATE)
+        self._act_nav_mode.setChecked(not checked)
+        self._act_bal_mode.setChecked(checked)
+        self._act_move_mode.setChecked(False)
+
+    def _on_move_btn_toggled(self, checked: bool):
+        if checked:
+            self._btn_balloon.blockSignals(True)
+            self._btn_balloon.setChecked(False)
+            self._btn_balloon.blockSignals(False)
+        self._viewer.set_mode(ViewMode.MOVE if checked else ViewMode.NAVIGATE)
+        self._act_nav_mode.setChecked(not checked)
+        self._act_bal_mode.setChecked(False)
+        self._act_move_mode.setChecked(checked)
 
     # ------------------------------------------------------------------
     # File operations
