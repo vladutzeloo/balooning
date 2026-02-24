@@ -33,6 +33,8 @@ class BalloonData:
     balloon_center: QPointF       # PDF coords — centre of the circle
     description: str = ""
     diameter: float = 20.0        # PDF points
+    style: str = "default"        # "default" | "red" | "outline"
+    font_size_override: float = 0.0  # 0 = auto-size based on radius
     uid: str = field(default_factory=make_uid)
 
     def to_dict(self) -> dict:
@@ -43,6 +45,8 @@ class BalloonData:
             "balloon_center": [self.balloon_center.x(), self.balloon_center.y()],
             "description": self.description,
             "diameter": self.diameter,
+            "style": self.style,
+            "font_size_override": self.font_size_override,
             "uid": self.uid,
         }
 
@@ -55,6 +59,8 @@ class BalloonData:
             balloon_center=QPointF(*d["balloon_center"]),
             description=d.get("description", ""),
             diameter=d.get("diameter", 20.0),
+            style=d.get("style", "default"),
+            font_size_override=d.get("font_size_override", 0.0),
             uid=d["uid"],
         )
 
@@ -171,39 +177,67 @@ class BalloonItem(QGraphicsItem):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self._radius()
         tl = self._target_local()
+        style = self._data.style
+
+        # Resolve colours by style
+        if style == "red":
+            circle_fill = QColor("red")
+            circle_border = QColor("black")
+            text_color = QColor("white")
+            leader_color = QColor("red")
+        elif style == "outline":
+            circle_fill = Qt.GlobalColor.transparent
+            circle_border = QColor("black")
+            text_color = QColor("black")
+            leader_color = QColor("red")
+        else:  # "default"
+            circle_fill = QColor("white")
+            circle_border = QColor("black")
+            text_color = QColor("black")
+            leader_color = QColor("red")
 
         # --- Leader line ---
-        pen = QPen(QColor("red"))
+        pen = QPen(leader_color)
         pen.setWidth(2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.drawLine(QPointF(0, 0), tl)
 
         # Arrow head at target
-        self._draw_arrowhead(painter, QPointF(0, 0), tl)
+        self._draw_arrowhead(painter, QPointF(0, 0), tl, leader_color)
 
         # --- Circle ---
         if self.isSelected():
-            pen = QPen(QColor("#0078d7"), 2)
+            border_pen = QPen(QColor("#0078d7"), 2)
         else:
-            pen = QPen(QColor("black"), 2)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(QBrush(QColor("white")))
+            border_pen = QPen(circle_border, 2)
+        border_pen.setCosmetic(True)
+        painter.setPen(border_pen)
+        if circle_fill == Qt.GlobalColor.transparent:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+        else:
+            painter.setBrush(QBrush(circle_fill))
         painter.drawEllipse(QPointF(0, 0), r, r)
 
         # --- Number ---
-        font = QFont("Arial", int(r * 0.9))
+        if self._data.font_size_override > 0:
+            font_size = int(self._data.font_size_override)
+        else:
+            font_size = max(6, int(r * 0.9))
+        font = QFont("Arial", font_size)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QPen(QColor("black")))
+        painter.setPen(QPen(text_color))
         painter.drawText(
             QRectF(-r, -r, 2 * r, 2 * r),
             Qt.AlignmentFlag.AlignCenter,
             str(self._data.number),
         )
 
-    def _draw_arrowhead(self, painter: QPainter, from_pt: QPointF, to_pt: QPointF):
+    def _draw_arrowhead(self, painter: QPainter, from_pt: QPointF, to_pt: QPointF,
+                        color: QColor = None):
+        if color is None:
+            color = QColor("red")
         dx = to_pt.x() - from_pt.x()
         dy = to_pt.y() - from_pt.y()
         length = math.hypot(dx, dy)
@@ -215,7 +249,7 @@ class BalloonItem(QGraphicsItem):
                        to_pt.y() - s * uy - s * 0.5 * ux)
         right = QPointF(to_pt.x() - s * ux - s * 0.5 * uy,
                         to_pt.y() - s * uy + s * 0.5 * ux)
-        painter.setBrush(QBrush(QColor("red")))
+        painter.setBrush(QBrush(color))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(QPolygonF([to_pt, left, right]))
 

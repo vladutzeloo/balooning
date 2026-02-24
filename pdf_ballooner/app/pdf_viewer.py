@@ -58,6 +58,7 @@ class PDFViewer(QGraphicsView):
         self._zoom: float = 1.0          # view zoom (applied via QGraphicsView transform)
         self._page_height: float = 0.0   # PDF page height in points
         self._mode: ViewMode = ViewMode.NAVIGATE
+        self._page_rotations: dict[int, int] = {}  # page_idx -> rotation degrees (0/90/180/270)
 
         # uid -> BalloonItem for the *current page only*
         self._balloon_items: dict[str, BalloonItem] = {}
@@ -75,11 +76,26 @@ class PDFViewer(QGraphicsView):
         self._doc = fitz.open(path)
         self._pdf_path = path
         self._all_balloons.clear()
+        self._page_rotations.clear()
         self._current_page = 0
         self._zoom = 1.0
         self._render_page(self._current_page)
         self.page_changed.emit(self._current_page, len(self._doc))
         self.zoom_changed.emit(self._zoom)
+
+    def rotate_page_cw(self):
+        """Rotate the current page 90° clockwise."""
+        self._rotate_current(90)
+
+    def rotate_page_ccw(self):
+        """Rotate the current page 90° counter-clockwise."""
+        self._rotate_current(-90)
+
+    def _rotate_current(self, delta: int):
+        idx = self._current_page
+        current = self._page_rotations.get(idx, 0)
+        self._page_rotations[idx] = (current + delta) % 360
+        self._render_page(idx)
 
     def set_page(self, idx: int):
         if self._doc is None:
@@ -202,24 +218,32 @@ class PDFViewer(QGraphicsView):
             return
 
         page = self._doc[page_idx]
-        self._page_height = page.rect.height   # PDF points
+        rotation = self._page_rotations.get(page_idx, 0)
 
-        # Render at BASE_DPI: scale factor = DPI / 72
+        # Render at BASE_DPI with rotation applied
         scale = _BASE_DPI / _POINTS_PER_INCH
-        mat = fitz.Matrix(scale, scale)
+        mat = fitz.Matrix(scale, scale).prerotate(rotation)
         pix = page.get_pixmap(matrix=mat, alpha=False)
+
+        # After rotation, width/height may be swapped
+        if rotation in (90, 270):
+            self._page_height = page.rect.width
+        else:
+            self._page_height = page.rect.height
 
         img = QImage(pix.samples, pix.width, pix.height,
                      pix.stride, QImage.Format.Format_RGB888)
         qpix = QPixmap.fromImage(img)
 
         self._pixmap_item = QGraphicsPixmapItem(qpix)
-        # Place the pixmap so that its top-left = PDF top-left in scene space.
-        # Scene space uses PDF-point coords (Y flipped), so the page occupies
-        # [0, page_width] x [0, page_height].
-        # We scale the pixmap item to match PDF points.
-        pt_w = page.rect.width
-        pt_h = page.rect.height
+        # After rotation, the rendered pixmap dimensions may be swapped.
+        # Use the actual pixmap dimensions to determine the scene rect size.
+        if rotation in (90, 270):
+            pt_w = page.rect.height
+            pt_h = page.rect.width
+        else:
+            pt_w = page.rect.width
+            pt_h = page.rect.height
         self._pixmap_item.setScale(1.0)  # will set transform below
         # Transform: pixmap px -> pdf pts
         px_to_pt = pt_w / pix.width

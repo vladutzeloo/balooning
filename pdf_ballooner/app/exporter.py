@@ -36,12 +36,29 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> Non
             cx = b.balloon_center.x()
             cy = b.balloon_center.y()
             r = b.diameter / 2.0
+            style = getattr(b, "style", "default")
+
+            # Resolve colours by style
+            if style == "red":
+                leader_color = (0.8, 0, 0)
+                circle_stroke = (0, 0, 0)
+                circle_fill = (1, 0, 0)
+                text_color = (1, 1, 1)
+            elif style == "outline":
+                leader_color = (0.8, 0, 0)
+                circle_stroke = (0, 0, 0)
+                circle_fill = None  # transparent
+                text_color = (0, 0, 0)
+            else:  # "default"
+                leader_color = (0.8, 0, 0)
+                circle_stroke = (0, 0, 0)
+                circle_fill = (1, 1, 1)
+                text_color = (0, 0, 0)
 
             target = fitz.Point(tx, ty)
             center = fitz.Point(cx, cy)
 
             # --- Leader line ---
-            # Compute the point on the circle edge closest to the target
             dx = tx - cx
             dy = ty - cy
             dist = math.hypot(dx, dy)
@@ -51,35 +68,34 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> Non
                 edge = fitz.Point(cx, cy - r)
 
             shape.draw_line(edge, target)
-            shape.finish(color=(0.8, 0, 0), width=1.5, stroke_opacity=1.0)
+            shape.finish(color=leader_color, width=1.5, stroke_opacity=1.0)
 
             # Arrow head at target point
-            _draw_arrowhead(shape, edge, target, size=5)
+            _draw_arrowhead(shape, edge, target, size=5, color=leader_color)
 
             # --- Balloon circle ---
             shape.draw_circle(center, r)
-            shape.finish(
-                color=(0, 0, 0),
-                fill=(1, 1, 1),
-                width=1.5,
-                fill_opacity=1.0,
-            )
+            if circle_fill is not None:
+                shape.finish(color=circle_stroke, fill=circle_fill, width=1.5, fill_opacity=1.0)
+            else:
+                shape.finish(color=circle_stroke, width=1.5, fill_opacity=0.0)
 
             # --- Number label ---
-            font_size = max(4.0, r * 1.1)
-            # insert_text origin is bottom-left of the text baseline
-            # Centre it approximately in the circle
+            font_size_override = getattr(b, "font_size_override", 0.0)
+            if font_size_override > 0:
+                font_size = font_size_override
+            else:
+                font_size = max(4.0, r * 1.1)
             text = str(b.number)
-            # Estimate text width: ~0.6 * font_size per character
             est_w = 0.6 * font_size * len(text)
             text_x = cx - est_w / 2
-            text_y = cy + font_size * 0.35   # slight upward shift for visual centring
+            text_y = cy + font_size * 0.35
             page.insert_text(
                 fitz.Point(text_x, text_y),
                 text,
-                fontname="hebo",   # Helvetica Bold
+                fontname="hebo",
                 fontsize=font_size,
-                color=(0, 0, 0),
+                color=text_color,
             )
 
         shape.commit()
@@ -89,7 +105,8 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> Non
 
 
 def _draw_arrowhead(shape: fitz.Shape, from_pt: fitz.Point,
-                    to_pt: fitz.Point, size: float = 6) -> None:
+                    to_pt: fitz.Point, size: float = 6,
+                    color: tuple = (0.8, 0, 0)) -> None:
     """Draw a filled triangular arrowhead at *to_pt* pointing away from *from_pt*."""
     dx = to_pt.x - from_pt.x
     dy = to_pt.y - from_pt.y
@@ -97,7 +114,6 @@ def _draw_arrowhead(shape: fitz.Shape, from_pt: fitz.Point,
     if length < 1:
         return
     ux, uy = dx / length, dy / length
-    # Perpendicular
     px, py = -uy, ux
     half = size * 0.45
     left  = fitz.Point(to_pt.x - size * ux + half * px,
@@ -105,7 +121,7 @@ def _draw_arrowhead(shape: fitz.Shape, from_pt: fitz.Point,
     right = fitz.Point(to_pt.x - size * ux - half * px,
                         to_pt.y - size * uy - half * py)
     shape.draw_polyline([to_pt, left, right, to_pt])
-    shape.finish(color=(0.8, 0, 0), fill=(0.8, 0, 0), width=0)
+    shape.finish(color=color, fill=color, width=0)
 
 
 def export_csv(dst_path: str, balloons: list[BalloonData]) -> None:
