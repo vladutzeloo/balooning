@@ -16,6 +16,8 @@ from PyQt6.QtWidgets import (
 
 from app.balloon import BalloonData
 from app.balloon_table import BalloonTableWidget
+from app.gdt import GDTAnnotation
+from app.gdt_panel import GDTPanelWidget
 from app.pdf_viewer import PDFViewer, ViewMode
 from app.exporter import export_pdf, export_csv
 
@@ -80,24 +82,30 @@ class MainWindow(QMainWindow):
         self.resize(1280, 900)
 
         self._undo_stack = QUndoStack(self)
-        self._next_balloon_number = 1
         self._pdf_path: str = ""
-        self._balloons: dict[str, BalloonData] = {}   # uid -> data
-        # For move undo: store position at mouse-press
+        self._balloons: dict[str, BalloonData] = {}
+        self._gdt_annotations: dict[str, GDTAnnotation] = {}
         self._move_origin: dict[str, tuple[QPointF, QPointF]] = {}
 
-        # Balloon style defaults (applied to newly placed balloons)
+        # Pending GD&T symbol to place on next canvas click
+        self._pending_gdt_symbol: str = ""
+
+        # Balloon style defaults for newly placed balloons
         self._default_style: str = "default"
-        self._default_diameter: float = 20.0
+        self._default_diameter: float = 36.0
         self._default_font_size: float = 0.0  # 0 = auto
 
         # -- Central viewer --
         self._viewer = PDFViewer(self)
         self.setCentralWidget(self._viewer)
 
-        # -- Side panel --
+        # -- Side panel: balloon table --
         self._table = BalloonTableWidget(self)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._table)
+
+        # -- Side panel: GD&T symbols --
+        self._gdt_panel = GDTPanelWidget(self)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._gdt_panel)
 
         # -- Status bar --
         self._status_page  = QLabel("No file open")
@@ -154,6 +162,9 @@ class MainWindow(QMainWindow):
         redo_act.setShortcut("Ctrl+Shift+Z")
         edit_menu.addAction(undo_act)
         edit_menu.addAction(redo_act)
+        edit_menu.addSeparator()
+        edit_menu.addAction(QAction("&Renumber All Balloons", self,
+                                     triggered=self._renumber_balloons))
 
         # View
         view_menu = mb.addMenu("&View")
@@ -206,9 +217,7 @@ class MainWindow(QMainWindow):
         self._page_spin.setMinimum(1)
         self._page_spin.setMaximum(1)
         self._page_spin.setFixedWidth(55)
-        self._page_spin.valueChanged.connect(
-            lambda v: self._viewer.set_page(v - 1)
-        )
+        self._page_spin.valueChanged.connect(lambda v: self._viewer.set_page(v - 1))
         tb.addWidget(self._page_spin)
         tb.addAction(QAction("►", self, triggered=self._viewer.next_page))
         tb.addSeparator()
@@ -232,19 +241,24 @@ class MainWindow(QMainWindow):
 
         opt_tb.addWidget(QLabel("  Style: "))
         self._style_combo = QComboBox()
-        self._style_combo.addItems(["Default (white)", "Red circle", "Outline only"])
-        self._style_combo.setFixedWidth(130)
+        self._style_combo.addItems([
+            "Default (white)",
+            "Red circle",
+            "Outline only",
+            "Red dot (no arrow)",
+        ])
+        self._style_combo.setFixedWidth(150)
         self._style_combo.currentIndexChanged.connect(self._on_style_changed)
         opt_tb.addWidget(self._style_combo)
 
         opt_tb.addWidget(QLabel("  Size: "))
         self._size_spin = QDoubleSpinBox()
-        self._size_spin.setRange(6.0, 200.0)
-        self._size_spin.setValue(20.0)
+        self._size_spin.setRange(4.0, 300.0)
+        self._size_spin.setValue(36.0)
         self._size_spin.setSingleStep(2.0)
         self._size_spin.setDecimals(1)
         self._size_spin.setSuffix(" pt")
-        self._size_spin.setFixedWidth(80)
+        self._size_spin.setFixedWidth(85)
         self._size_spin.valueChanged.connect(self._on_size_changed)
         opt_tb.addWidget(self._size_spin)
 
@@ -259,6 +273,10 @@ class MainWindow(QMainWindow):
         self._font_spin.valueChanged.connect(self._on_font_size_changed)
         opt_tb.addWidget(self._font_spin)
 
+        opt_tb.addSeparator()
+        opt_tb.addAction(QAction("Renumber", self,
+                                  triggered=self._renumber_balloons))
+
     # ------------------------------------------------------------------
     # Signal wiring
     # ------------------------------------------------------------------
@@ -271,8 +289,14 @@ class MainWindow(QMainWindow):
         self._viewer.balloon_num_changed.connect(self._on_balloon_num_changed)
         self._viewer.page_changed.connect(self._on_page_changed)
         self._viewer.zoom_changed.connect(self._on_zoom_changed)
+
+        self._viewer.gdt_requested.connect(self._on_gdt_requested)
+        self._viewer.gdt_deleted.connect(self._on_gdt_deleted)
+
         self._table.balloon_selected.connect(self._viewer.scroll_to_balloon)
         self._table.description_changed.connect(self._on_balloon_desc_changed)
+
+        self._gdt_panel.symbol_selected.connect(self._on_gdt_symbol_selected)
 
     # ------------------------------------------------------------------
     # Mode
@@ -281,9 +305,15 @@ class MainWindow(QMainWindow):
     def _set_mode(self, mode: ViewMode):
         self._viewer.set_mode(mode)
         is_balloon = mode == ViewMode.BALLOON
+        is_gdt     = mode == ViewMode.GDT
         self._mode_btn.setChecked(is_balloon)
-        self._mode_btn.setText("Mode: Balloon" if is_balloon else "Mode: Navigate")
-        self._act_nav_mode.setChecked(not is_balloon)
+        if is_gdt:
+            self._mode_btn.setText("Mode: GD&T")
+        elif is_balloon:
+            self._mode_btn.setText("Mode: Balloon")
+        else:
+            self._mode_btn.setText("Mode: Navigate")
+        self._act_nav_mode.setChecked(not is_balloon and not is_gdt)
         self._act_bal_mode.setChecked(is_balloon)
 
     def _on_mode_btn_toggled(self, checked: bool):
@@ -301,13 +331,12 @@ class MainWindow(QMainWindow):
             return
         self._pdf_path = path
         self._balloons.clear()
-        self._next_balloon_number = 1
+        self._gdt_annotations.clear()
         self._undo_stack.clear()
         self._table.clear_all()
         self._viewer.load_pdf(path)
         self.setWindowTitle(f"PDF Ballooner — {Path(path).name}")
 
-        # Auto-load sidecar if present
         sidecar = Path(path).with_suffix(".balloons.json")
         if sidecar.exists():
             reply = QMessageBox.question(
@@ -331,7 +360,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            export_pdf(self._pdf_path, path, list(self._balloons.values()))
+            export_pdf(self._pdf_path, path,
+                       list(self._balloons.values()),
+                       list(self._gdt_annotations.values()))
             QMessageBox.information(self, "Done", f"Saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
@@ -362,9 +393,13 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        data = [b.to_dict() for b in self._balloons.values()]
+        data = {
+            "pdf": self._pdf_path,
+            "balloons": [b.to_dict() for b in self._balloons.values()],
+            "gdt": [a.to_dict() for a in self._gdt_annotations.values()],
+        }
         with open(path, "w") as f:
-            json.dump({"pdf": self._pdf_path, "balloons": data}, f, indent=2)
+            json.dump(data, f, indent=2)
         QMessageBox.information(self, "Saved", f"Session saved to:\n{path}")
 
     def load_session(self):
@@ -382,13 +417,15 @@ class MainWindow(QMainWindow):
             for d in raw.get("balloons", []):
                 data = BalloonData.from_dict(d)
                 self._do_add_balloon(data)
-                if data.number >= self._next_balloon_number:
-                    self._next_balloon_number = data.number + 1
+            for d in raw.get("gdt", []):
+                annot = GDTAnnotation.from_dict(d)
+                self._gdt_annotations[annot.uid] = annot
+                self._viewer.add_gdt(annot)
         except Exception as e:
             QMessageBox.critical(self, "Load Error", str(e))
 
     # ------------------------------------------------------------------
-    # Balloon operations (called by undo commands and signals)
+    # Balloon operations
     # ------------------------------------------------------------------
 
     def _do_add_balloon(self, data: BalloonData):
@@ -413,11 +450,41 @@ class MainWindow(QMainWindow):
         self._table.update_balloon(data)
 
     # ------------------------------------------------------------------
+    # Numbering helpers
+    # ------------------------------------------------------------------
+
+    def _next_free_number(self) -> int:
+        """Return the lowest positive integer not currently used by any balloon."""
+        used = {b.number for b in self._balloons.values()}
+        n = 1
+        while n in used:
+            n += 1
+        return n
+
+    def _renumber_balloons(self):
+        """Renumber all balloons sequentially: sorted by page, then top-to-bottom."""
+        if not self._balloons:
+            return
+        sorted_bs = sorted(
+            self._balloons.values(),
+            key=lambda b: (b.page, -b.balloon_center.y(), b.balloon_center.x()),
+        )
+        for i, b in enumerate(sorted_bs, 1):
+            b.number = i
+            item = self._viewer._balloon_items.get(b.uid)
+            if item:
+                item.set_number(i)
+            self._table.update_balloon(b)
+        self._table.clear_all()
+        for b in sorted(self._balloons.values(), key=lambda b: (b.page, b.number)):
+            self._table.add_balloon(b)
+
+    # ------------------------------------------------------------------
     # Signal handlers
     # ------------------------------------------------------------------
 
     def _on_style_changed(self, idx: int):
-        styles = ["default", "red", "outline"]
+        styles = ["default", "red", "outline", "no_arrow"]
         self._default_style = styles[idx]
 
     def _on_size_changed(self, value: float):
@@ -427,10 +494,9 @@ class MainWindow(QMainWindow):
         self._default_font_size = value
 
     def _on_balloon_requested(self, target_pdf: QPointF, page: int):
-        # Balloon circle is offset ~50 pts up-right from click
         center_pdf = QPointF(target_pdf.x() + 40, target_pdf.y() + 40)
         data = BalloonData(
-            number=self._next_balloon_number,
+            number=self._next_free_number(),
             page=page,
             target_point=target_pdf,
             balloon_center=center_pdf,
@@ -438,7 +504,6 @@ class MainWindow(QMainWindow):
             style=self._default_style,
             font_size_override=self._default_font_size,
         )
-        self._next_balloon_number += 1
         cmd = PlaceBalloonCommand(self, data)
         self._undo_stack.push(cmd)
 
@@ -446,7 +511,6 @@ class MainWindow(QMainWindow):
         data = self._balloons.get(uid)
         if not data:
             return
-        # The viewer already updated its own copy; sync table
         self._table.update_balloon(data)
 
     def _on_balloon_deleted(self, uid: str):
@@ -467,6 +531,28 @@ class MainWindow(QMainWindow):
         if data:
             data.number = num
             self._table.update_balloon(data)
+
+    def _on_gdt_symbol_selected(self, symbol: str):
+        """Called when user clicks a GD&T symbol button."""
+        self._pending_gdt_symbol = symbol
+        self._set_mode(ViewMode.GDT)
+        self._status_page.setText(f"Click on PDF to place: {symbol}")
+
+    def _on_gdt_requested(self, pos_pdf: QPointF, page: int):
+        if not self._pending_gdt_symbol:
+            return
+        annot = GDTAnnotation(
+            symbol=self._pending_gdt_symbol,
+            page=page,
+            position=pos_pdf,
+        )
+        self._gdt_annotations[annot.uid] = annot
+        self._viewer.add_gdt(annot)
+        # Stay in GDT mode so the user can place the same symbol multiple times
+
+    def _on_gdt_deleted(self, uid: str):
+        self._gdt_annotations.pop(uid, None)
+        self._viewer.remove_gdt(uid)
 
     def _on_page_changed(self, current: int, total: int):
         self._status_page.setText(f"Page {current + 1} / {total}")
