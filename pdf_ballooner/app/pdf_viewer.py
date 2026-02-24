@@ -18,6 +18,7 @@ from app.utils import pdf_to_scene, scene_to_pdf
 class ViewMode(Enum):
     NAVIGATE = auto()
     BALLOON  = auto()
+    MOVE     = auto()
 
 
 _BASE_DPI        = 150
@@ -112,7 +113,10 @@ class PDFViewer(QGraphicsView):
         if mode == ViewMode.NAVIGATE:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
-        else:
+        elif mode == ViewMode.MOVE:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:  # BALLOON
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
 

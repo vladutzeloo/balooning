@@ -1,9 +1,11 @@
-"""GD&T Feature Control Frame builder and Dimension entry panel.
+"""GD&T Feature Control Frame builder, Dimension entry, and Surface Roughness panel.
 
-Two tabs:
-  • GD&T  — compose a feature control frame (symbol, tolerance, modifiers,
-             datum references) with a live preview.
-  • 123   — compose a dimension callout (type, nominal, tolerance band).
+Three tabs:
+  • GD&T    — compose a feature control frame (symbol, tolerance, modifiers,
+               datum references) with a live preview.
+  • 123     — compose a dimension callout (type, nominal, tolerance band).
+  • Surface — compose a surface roughness callout (ISO 1302 / ASME Y14.36M):
+               parameter, value, units, lay, process method.
 
 Clicking "Enter ✓" emits ``apply_description(str)`` which the main window
 uses to save the text as the selected balloon's description.  The description
@@ -59,6 +61,43 @@ DIMENSION_TYPES = [
     ("∠",  "Angular  (°)"),
 ]
 
+# ── Surface roughness ────────────────────────────────────────────────────────
+# Process restriction → symbol prefix (closest Unicode approximation)
+SURFACE_PROCESS = [
+    ("√",  "Any process"),
+    ("√̄",  "Machining required"),
+    ("⊙√", "No machining / as-cast"),
+]
+
+SURFACE_PARAMS = ["Ra", "Rz", "Rmax", "Rt", "Rq", "Rsk", "Rku"]
+
+SURFACE_GRADES = [
+    ("",      "Custom value"),
+    ("0.025", "N1"),
+    ("0.05",  "N2"),
+    ("0.1",   "N3"),
+    ("0.2",   "N4"),
+    ("0.4",   "N5"),
+    ("0.8",   "N6  ← typical machined"),
+    ("1.6",   "N7"),
+    ("3.2",   "N8"),
+    ("6.3",   "N9"),
+    ("12.5",  "N10"),
+    ("25",    "N11"),
+    ("50",    "N12"),
+]
+
+SURFACE_LAY = [
+    ("",  "—  (not specified)"),
+    ("=", "=   Parallel to projection plane"),
+    ("⊥", "⊥  Perpendicular"),
+    ("X", "X   Crossed"),
+    ("M", "M   Multidirectional"),
+    ("C", "C   Circular"),
+    ("R", "R   Radial"),
+    ("P", "P   Particulate / non-directional"),
+]
+
 
 class GDTPanelWidget(QDockWidget):
     """Feature control frame builder + dimension entry dock panel."""
@@ -97,12 +136,14 @@ class GDTPanelWidget(QDockWidget):
         root_vl.addWidget(self._tabs)
         self._tabs.addTab(self._build_gdt_tab(), "GD&T")
         self._tabs.addTab(self._build_dim_tab(), "123 Dimension")
+        self._tabs.addTab(self._build_surface_tab(), "⊙ Surface")
 
         root_vl.addStretch()
         self.setWidget(root)
 
         self._update_gdt_preview()
         self._update_dim_preview()
+        self._update_surface_preview()
 
     # ────────────────────────────────────────────────────────────────────
     # GD&T tab
@@ -378,6 +419,150 @@ class GDTPanelWidget(QDockWidget):
         self.apply_description.emit(self._build_dim_string())
 
     # ────────────────────────────────────────────────────────────────────
+    # Surface Roughness tab  (ISO 1302 / ASME Y14.36M)
+    # ────────────────────────────────────────────────────────────────────
+
+    def _build_surface_tab(self) -> QWidget:
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(4, 6, 4, 4)
+        vl.setSpacing(6)
+
+        # ── Symbol / process restriction ─────────────────────────────────
+        sym_frame = QFrame()
+        sym_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        sg = QGridLayout(sym_frame)
+        sg.setSpacing(4)
+
+        sg.addWidget(QLabel("Process:"), 0, 0)
+        self._surf_process_combo = QComboBox()
+        self._surf_process_combo.setFont(QFont("Arial", 11))
+        for sym, name in SURFACE_PROCESS:
+            self._surf_process_combo.addItem(f"{sym}  {name}", sym)
+        self._surf_process_combo.currentIndexChanged.connect(self._update_surface_preview)
+        sg.addWidget(self._surf_process_combo, 0, 1, 1, 3)
+
+        # ── Parameter + value ────────────────────────────────────────────
+        sg.addWidget(QLabel("Parameter:"), 1, 0)
+        self._surf_param_combo = QComboBox()
+        for p in SURFACE_PARAMS:
+            self._surf_param_combo.addItem(p)
+        self._surf_param_combo.currentIndexChanged.connect(self._update_surface_preview)
+        sg.addWidget(self._surf_param_combo, 1, 1)
+
+        sg.addWidget(QLabel("Grade:"), 2, 0)
+        self._surf_grade_combo = QComboBox()
+        self._surf_grade_combo.setFixedWidth(160)
+        for val, label in SURFACE_GRADES:
+            self._surf_grade_combo.addItem(f"{label}" if val else label, val)
+        self._surf_grade_combo.currentIndexChanged.connect(self._on_grade_selected)
+        sg.addWidget(self._surf_grade_combo, 2, 1, 1, 3)
+
+        sg.addWidget(QLabel("Value:"), 3, 0)
+        self._surf_value_edit = QLineEdit("0.8")
+        self._surf_value_edit.setFixedWidth(70)
+        self._surf_value_edit.textChanged.connect(self._update_surface_preview)
+        sg.addWidget(self._surf_value_edit, 3, 1)
+
+        sg.addWidget(QLabel("Units:"), 3, 2)
+        self._surf_units_combo = QComboBox()
+        self._surf_units_combo.addItems(["μm", "μin"])
+        self._surf_units_combo.currentIndexChanged.connect(self._update_surface_preview)
+        sg.addWidget(self._surf_units_combo, 3, 3)
+
+        vl.addWidget(sym_frame)
+
+        # ── Lay direction ────────────────────────────────────────────────
+        lay_frame = QFrame()
+        lay_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        lg = QGridLayout(lay_frame)
+        lg.setSpacing(4)
+        lg.addWidget(QLabel("Lay direction:"), 0, 0)
+        self._surf_lay_combo = QComboBox()
+        self._surf_lay_combo.setFont(QFont("Arial", 11))
+        for sym, name in SURFACE_LAY:
+            self._surf_lay_combo.addItem(name, sym)
+        self._surf_lay_combo.currentIndexChanged.connect(self._update_surface_preview)
+        lg.addWidget(self._surf_lay_combo, 0, 1)
+        vl.addWidget(lay_frame)
+
+        # ── Process / method note (optional) ─────────────────────────────
+        met_frame = QFrame()
+        met_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        mfl = QGridLayout(met_frame)
+        mfl.setSpacing(4)
+        mfl.addWidget(QLabel("Method (opt.):"), 0, 0)
+        self._surf_method_edit = QLineEdit()
+        self._surf_method_edit.setPlaceholderText("e.g. Ground, Turned, Milled…")
+        self._surf_method_edit.textChanged.connect(self._update_surface_preview)
+        mfl.addWidget(self._surf_method_edit, 0, 1)
+        vl.addWidget(met_frame)
+
+        # ── Live preview ─────────────────────────────────────────────────
+        prev_frame = QFrame()
+        prev_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        prev_frame.setStyleSheet("QFrame { background:#eef3ff; border-radius:4px; }")
+        pfl = QVBoxLayout(prev_frame)
+        pfl.setContentsMargins(6, 6, 6, 6)
+        self._surf_preview = QLabel()
+        self._surf_preview.setFont(QFont("Arial", 12))
+        self._surf_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._surf_preview.setWordWrap(True)
+        pfl.addWidget(self._surf_preview)
+        vl.addWidget(prev_frame)
+
+        # ── Buttons ──────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        clr = QPushButton("Clear")
+        clr.clicked.connect(self._clear_surface)
+        self._surf_apply_btn = QPushButton("Enter ✓")
+        self._surf_apply_btn.setEnabled(False)
+        self._surf_apply_btn.clicked.connect(self._apply_surface)
+        btn_row.addWidget(clr)
+        btn_row.addWidget(self._surf_apply_btn)
+        vl.addLayout(btn_row)
+        vl.addStretch()
+
+        return w
+
+    def _on_grade_selected(self, idx: int):
+        val = self._surf_grade_combo.itemData(idx)
+        if val:  # pre-set grade → push value into the line edit
+            self._surf_value_edit.setText(val)
+        self._update_surface_preview()
+
+    def _build_surface_string(self) -> str:
+        sym   = self._surf_process_combo.currentData() or "√"
+        param = self._surf_param_combo.currentText()
+        value = self._surf_value_edit.text().strip()
+        units = self._surf_units_combo.currentText()
+        lay   = self._surf_lay_combo.currentData() or ""
+        meth  = self._surf_method_edit.text().strip()
+
+        parts = [f"{sym} {param} {value} {units}"]
+        if lay:
+            parts.append(f"Lay: {lay}")
+        if meth:
+            parts.append(meth)
+        return "  |  ".join(parts)
+
+    def _update_surface_preview(self):
+        self._surf_preview.setText(self._build_surface_string())
+
+    def _clear_surface(self):
+        self._surf_process_combo.setCurrentIndex(0)
+        self._surf_param_combo.setCurrentIndex(0)
+        self._surf_grade_combo.setCurrentIndex(0)
+        self._surf_value_edit.setText("0.8")
+        self._surf_units_combo.setCurrentIndex(0)
+        self._surf_lay_combo.setCurrentIndex(0)
+        self._surf_method_edit.clear()
+        self._update_surface_preview()
+
+    def _apply_surface(self):
+        self.apply_description.emit(self._build_surface_string())
+
+    # ────────────────────────────────────────────────────────────────────
     # Public API (called by MainWindow)
     # ────────────────────────────────────────────────────────────────────
 
@@ -388,9 +573,11 @@ class GDTPanelWidget(QDockWidget):
         )
         self._gdt_apply_btn.setEnabled(True)
         self._dim_apply_btn.setEnabled(True)
+        self._surf_apply_btn.setEnabled(True)
 
     def clear_selection(self):
         self._balloon_label.setText("No balloon selected")
         self._current_desc_label.setText("")
         self._gdt_apply_btn.setEnabled(False)
         self._dim_apply_btn.setEnabled(False)
+        self._surf_apply_btn.setEnabled(False)
