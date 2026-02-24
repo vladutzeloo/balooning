@@ -1,15 +1,13 @@
-"""GD&T description builder panel.
+"""GD&T Feature Control Frame builder and Dimension entry panel.
 
-This panel is used to compose balloon descriptions that contain GD&T symbols,
-to be exported in the inspection sheet (CSV).  It is NOT for placing annotations
-on the PDF drawing.
+Two tabs:
+  • GD&T  — compose a feature control frame (symbol, tolerance, modifiers,
+             datum references) with a live preview.
+  • 123   — compose a dimension callout (type, nominal, tolerance band).
 
-Workflow:
-  1. Click a balloon in the table or on the canvas to select it.
-  2. The panel loads that balloon's current description.
-  3. Click GD&T symbol buttons to insert symbols at the cursor position.
-  4. Type any additional text (tolerances, datum references, etc.).
-  5. Click "Apply" to save the description back to the selected balloon.
+Clicking "Enter ✓" emits ``apply_description(str)`` which the main window
+uses to save the text as the selected balloon's description.  The description
+is then exported to the CSV / Excel inspection sheet.
 """
 from __future__ import annotations
 
@@ -17,119 +15,382 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QGridLayout, QPushButton,
-    QLabel, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
+    QLabel, QVBoxLayout, QHBoxLayout, QLineEdit,
+    QComboBox, QFrame, QTabWidget,
 )
 
-# (button label, symbol to insert, tooltip)
-GDT_SYMBOLS = [
-    ("⏤",  "⏤",  "Straightness"),
-    ("⏥",  "⏥",  "Flatness"),
-    ("○",   "○",   "Circularity"),
-    ("⌭",  "⌭",  "Cylindricity"),
-    ("⌒",  "⌒",  "Profile of a Line"),
-    ("⌓",  "⌓",  "Profile of a Surface"),
-    ("⊥",  "⊥",  "Perpendicularity"),
-    ("∠",  "∠",  "Angularity"),
-    ("∥",  "∥",  "Parallelism"),
-    ("⊕",  "⊕",  "True Position"),
-    ("◎",  "◎",  "Concentricity"),
-    ("⌯",  "⌯",  "Symmetry"),
-    ("⌀",  "⌀",  "Diameter"),
-    ("Ⓜ",  "Ⓜ",  "Max Material Condition"),
-    ("Ⓛ",  "Ⓛ",  "Least Material Condition"),
-    ("Ⓢ",  "Ⓢ",  "Regardless of Feature Size"),
-    ("±",   "±",   "Bilateral Tolerance"),
-    ("▽",  "▽",  "Datum Feature"),
+# ── GD&T characteristic symbols ─────────────────────────────────────────────
+GDT_CHARACTERISTICS = [
+    ("⊕",  "True Position"),
+    ("⏤",  "Straightness"),
+    ("⏥",  "Flatness"),
+    ("○",   "Circularity"),
+    ("⌭",  "Cylindricity"),
+    ("⌒",  "Profile of a Line"),
+    ("⌓",  "Profile of a Surface"),
+    ("⊥",  "Perpendicularity"),
+    ("∠",  "Angularity"),
+    ("∥",  "Parallelism"),
+    ("◎",  "Concentricity"),
+    ("⌯",  "Symmetry"),
+    ("↗",  "Circular Runout"),
+    ("⇗",  "Total Runout"),
 ]
 
-_COLS = 3
+# ── Modifier buttons: (label, tooltip, group) ─────────────────────────────
+# group "mat"  = mutually exclusive (M/L/S)
+# group "zone" = independent toggle
+MODIFIERS = [
+    ("Ⓜ",  "Max Material Condition (MMC)",   "mat"),
+    ("Ⓛ",  "Least Material Condition (LMC)", "mat"),
+    ("Ⓢ",  "Regardless of Feature Size",     "mat"),
+    ("F",   "Free State",                     "zone"),
+    ("T",   "Tangent Plane",                  "zone"),
+    ("P",   "Projected Tolerance Zone",        "zone"),
+    ("ST",  "Statistical Tolerance",           "zone"),
+]
+
+# ── Dimension types ──────────────────────────────────────────────────────────
+DIMENSION_TYPES = [
+    ("",   "Linear"),
+    ("⌀",  "Diameter"),
+    ("R",  "Radius"),
+    ("□",  "Square / Width"),
+    ("∠",  "Angular  (°)"),
+]
 
 
 class GDTPanelWidget(QDockWidget):
-    """Description builder: compose GD&T descriptions for balloons."""
+    """Feature control frame builder + dimension entry dock panel."""
 
-    # Emitted when the user clicks Apply; carries the new description text.
-    apply_description = pyqtSignal(str)
+    apply_description = pyqtSignal(str)   # formatted string → balloon description
 
     def __init__(self, parent=None):
-        super().__init__("GD&T Description Builder", parent)
+        super().__init__("GD&T / Dimension Builder", parent)
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea |
             Qt.DockWidgetArea.RightDockWidgetArea
         )
+        self.setMinimumWidth(310)
 
-        w = QWidget()
-        vlay = QVBoxLayout(w)
-        vlay.setContentsMargins(4, 4, 4, 4)
-        vlay.setSpacing(4)
+        root = QWidget()
+        root_vl = QVBoxLayout(root)
+        root_vl.setContentsMargins(4, 4, 4, 4)
+        root_vl.setSpacing(4)
 
-        # Which balloon is currently loaded
+        # ── Balloon identification header ────────────────────────────────
         self._balloon_label = QLabel("No balloon selected")
         self._balloon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = self._balloon_label.font()
-        font.setBold(True)
-        self._balloon_label.setFont(font)
-        vlay.addWidget(self._balloon_label)
+        lf = self._balloon_label.font()
+        lf.setBold(True)
+        self._balloon_label.setFont(lf)
+        root_vl.addWidget(self._balloon_label)
 
-        # Text area for building the description
-        self._desc_edit = QPlainTextEdit()
-        self._desc_edit.setPlaceholderText("Select a balloon, then type or click symbols…")
-        self._desc_edit.setMaximumHeight(70)
-        vlay.addWidget(self._desc_edit)
+        self._current_desc_label = QLabel("")
+        self._current_desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._current_desc_label.setWordWrap(True)
+        self._current_desc_label.setStyleSheet("color:#555; font-style:italic; font-size:10px;")
+        root_vl.addWidget(self._current_desc_label)
 
-        # Apply / Clear buttons
+        # ── Tabs ────────────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        root_vl.addWidget(self._tabs)
+        self._tabs.addTab(self._build_gdt_tab(), "GD&T")
+        self._tabs.addTab(self._build_dim_tab(), "123 Dimension")
+
+        root_vl.addStretch()
+        self.setWidget(root)
+
+        self._update_gdt_preview()
+        self._update_dim_preview()
+
+    # ────────────────────────────────────────────────────────────────────
+    # GD&T tab
+    # ────────────────────────────────────────────────────────────────────
+
+    def _build_gdt_tab(self) -> QWidget:
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(4, 6, 4, 4)
+        vl.setSpacing(6)
+
+        # ── Symbol selector ──────────────────────────────────────────────
+        sym_frame = QFrame()
+        sym_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        sg = QGridLayout(sym_frame)
+        sg.setSpacing(4)
+
+        sg.addWidget(QLabel("Symbol:"), 0, 0)
+        self._sym_combo = QComboBox()
+        self._sym_combo.setFont(QFont("Arial", 12))
+        for sym, name in GDT_CHARACTERISTICS:
+            self._sym_combo.addItem(f"{sym}  {name}", sym)
+        self._sym_combo.currentIndexChanged.connect(self._update_gdt_preview)
+        sg.addWidget(self._sym_combo, 0, 1, 1, 5)
+
+        # Diameter prefix toggle + tolerance value
+        self._dia_btn = QPushButton("⌀")
+        self._dia_btn.setFont(QFont("Arial", 12))
+        self._dia_btn.setToolTip("Prefix tolerance with ⌀ (diameter symbol)")
+        self._dia_btn.setCheckable(True)
+        self._dia_btn.setFixedSize(34, 28)
+        self._dia_btn.toggled.connect(self._update_gdt_preview)
+        sg.addWidget(self._dia_btn, 1, 0)
+
+        sg.addWidget(QLabel("Tol.:"), 1, 1)
+        self._tol_edit = QLineEdit("0.05")
+        self._tol_edit.setFixedWidth(70)
+        self._tol_edit.textChanged.connect(self._update_gdt_preview)
+        sg.addWidget(self._tol_edit, 1, 2)
+
+        vl.addWidget(sym_frame)
+
+        # ── Modifier buttons ─────────────────────────────────────────────
+        mod_frame = QFrame()
+        mod_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        mg = QGridLayout(mod_frame)
+        mg.setSpacing(3)
+        mg.addWidget(QLabel("Modifiers:"), 0, 0, 1, 4)
+
+        self._mod_btns: dict[str, QPushButton] = {}
+        mat_group: list[QPushButton] = []
+
+        for idx, (label, tip, group) in enumerate(MODIFIERS):
+            btn = QPushButton(label)
+            btn.setFont(QFont("Arial", 10))
+            btn.setToolTip(tip)
+            btn.setCheckable(True)
+            btn.setFixedHeight(28)
+            btn.toggled.connect(self._update_gdt_preview)
+            mg.addWidget(btn, 1 + idx // 4, idx % 4)
+            self._mod_btns[label] = btn
+            if group == "mat":
+                mat_group.append(btn)
+
+        # Material condition buttons are mutually exclusive
+        def _make_exclusive(me, others):
+            def _h(checked):
+                if checked:
+                    for b in others:
+                        b.setChecked(False)
+            return _h
+
+        for btn in mat_group:
+            others = [b for b in mat_group if b is not btn]
+            btn.toggled.connect(_make_exclusive(btn, others))
+
+        vl.addWidget(mod_frame)
+
+        # ── Datum references ─────────────────────────────────────────────
+        dat_frame = QFrame()
+        dat_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        dg = QGridLayout(dat_frame)
+        dg.setSpacing(4)
+        dg.addWidget(QLabel("Datum references:"), 0, 0, 1, 3)
+
+        self._datum_edits: list[QLineEdit] = []
+        bold_f = QFont("Arial", 12)
+        bold_f.setBold(True)
+        for col, lbl_text in enumerate(["Primary", "Secondary", "Tertiary"]):
+            lbl = QLabel(lbl_text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dg.addWidget(lbl, 1, col)
+            edit = QLineEdit()
+            edit.setFont(bold_f)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.setMaxLength(3)
+            edit.setPlaceholderText("–")
+            edit.textChanged.connect(self._update_gdt_preview)
+            dg.addWidget(edit, 2, col)
+            self._datum_edits.append(edit)
+
+        vl.addWidget(dat_frame)
+
+        # ── Live preview ─────────────────────────────────────────────────
+        prev_frame = QFrame()
+        prev_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        prev_frame.setStyleSheet("QFrame { background:#eef3ff; border-radius:4px; }")
+        pfl = QVBoxLayout(prev_frame)
+        pfl.setContentsMargins(6, 6, 6, 6)
+        self._gdt_preview = QLabel()
+        self._gdt_preview.setFont(QFont("Arial", 12))
+        self._gdt_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._gdt_preview.setWordWrap(True)
+        pfl.addWidget(self._gdt_preview)
+        vl.addWidget(prev_frame)
+
+        # ── Buttons ──────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        self._apply_btn = QPushButton("Apply to balloon")
-        self._apply_btn.setEnabled(False)
-        self._apply_btn.clicked.connect(self._on_apply)
-        self._clear_btn = QPushButton("Clear")
-        self._clear_btn.clicked.connect(self._desc_edit.clear)
-        btn_row.addWidget(self._apply_btn)
-        btn_row.addWidget(self._clear_btn)
-        vlay.addLayout(btn_row)
+        clr = QPushButton("Clear")
+        clr.clicked.connect(self._clear_gdt)
+        self._gdt_apply_btn = QPushButton("Enter ✓")
+        self._gdt_apply_btn.setEnabled(False)
+        self._gdt_apply_btn.clicked.connect(self._apply_gdt)
+        btn_row.addWidget(clr)
+        btn_row.addWidget(self._gdt_apply_btn)
+        vl.addLayout(btn_row)
 
-        vlay.addWidget(QLabel("Insert GD&T symbol:"))
+        return w
 
-        # Symbol grid
-        grid = QGridLayout()
-        grid.setSpacing(2)
-        btn_font = QFont("Arial", 12)
-        for idx, (lbl, sym, tip) in enumerate(GDT_SYMBOLS):
-            btn = QPushButton(lbl)
-            btn.setFont(btn_font)
-            btn.setToolTip(f"{tip}  ({sym})")
-            btn.setFixedSize(38, 38)
-            btn.clicked.connect(lambda _checked, s=sym: self._insert(s))
-            grid.addWidget(btn, idx // _COLS, idx % _COLS)
+    # ────────────────────────────────────────────────────────────────────
+    # Dimension tab
+    # ────────────────────────────────────────────────────────────────────
 
-        vlay.addLayout(grid)
-        vlay.addStretch()
-        self.setWidget(w)
+    def _build_dim_tab(self) -> QWidget:
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(4, 6, 4, 4)
+        vl.setSpacing(6)
 
-    # ------------------------------------------------------------------
+        frm = QFrame()
+        frm.setFrameShape(QFrame.Shape.StyledPanel)
+        fg = QGridLayout(frm)
+        fg.setSpacing(4)
+
+        fg.addWidget(QLabel("Type:"), 0, 0)
+        self._dim_type_combo = QComboBox()
+        for prefix, name in DIMENSION_TYPES:
+            label = f"{prefix}  {name}" if prefix else name
+            self._dim_type_combo.addItem(label, prefix)
+        self._dim_type_combo.currentIndexChanged.connect(self._update_dim_preview)
+        fg.addWidget(self._dim_type_combo, 0, 1, 1, 2)
+
+        fg.addWidget(QLabel("Nominal:"), 1, 0)
+        self._dim_nominal = QLineEdit("0.000")
+        self._dim_nominal.textChanged.connect(self._update_dim_preview)
+        fg.addWidget(self._dim_nominal, 1, 1, 1, 2)
+
+        fg.addWidget(QLabel("Upper tol.:"), 2, 0)
+        self._dim_upper = QLineEdit("+0.000")
+        self._dim_upper.textChanged.connect(self._update_dim_preview)
+        fg.addWidget(self._dim_upper, 2, 1, 1, 2)
+
+        fg.addWidget(QLabel("Lower tol.:"), 3, 0)
+        self._dim_lower = QLineEdit("-0.000")
+        self._dim_lower.textChanged.connect(self._update_dim_preview)
+        fg.addWidget(self._dim_lower, 3, 1, 1, 2)
+
+        vl.addWidget(frm)
+
+        prev_frame = QFrame()
+        prev_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        prev_frame.setStyleSheet("QFrame { background:#eef3ff; border-radius:4px; }")
+        pfl = QVBoxLayout(prev_frame)
+        pfl.setContentsMargins(6, 6, 6, 6)
+        self._dim_preview = QLabel()
+        self._dim_preview.setFont(QFont("Arial", 12))
+        self._dim_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pfl.addWidget(self._dim_preview)
+        vl.addWidget(prev_frame)
+
+        btn_row = QHBoxLayout()
+        clr = QPushButton("Clear")
+        clr.clicked.connect(self._clear_dim)
+        self._dim_apply_btn = QPushButton("Enter ✓")
+        self._dim_apply_btn.setEnabled(False)
+        self._dim_apply_btn.clicked.connect(self._apply_dim)
+        btn_row.addWidget(clr)
+        btn_row.addWidget(self._dim_apply_btn)
+        vl.addLayout(btn_row)
+        vl.addStretch()
+
+        return w
+
+    # ────────────────────────────────────────────────────────────────────
+    # String builders
+    # ────────────────────────────────────────────────────────────────────
+
+    def _build_gdt_string(self) -> str:
+        sym = self._sym_combo.currentData() or "?"
+        tol = self._tol_edit.text().strip()
+        dia = "⌀" if self._dia_btn.isChecked() else ""
+
+        # Mutually-exclusive material condition modifier
+        mat_mod = ""
+        for key in ("Ⓜ", "Ⓛ", "Ⓢ"):
+            if self._mod_btns.get(key) and self._mod_btns[key].isChecked():
+                mat_mod = key
+                break
+
+        # Independent zone modifiers
+        zone = "".join(
+            key for key in ("F", "T", "P", "ST")
+            if self._mod_btns.get(key) and self._mod_btns[key].isChecked()
+        )
+        zone_str = f"({zone})" if zone else ""
+
+        tol_cell = f"{dia}{tol}{mat_mod}{zone_str}"
+        datums = [e.text().strip().upper() for e in self._datum_edits]
+        parts = [sym, tol_cell] + [d for d in datums if d]
+        return "| " + " | ".join(parts) + " |"
+
+    def _build_dim_string(self) -> str:
+        prefix = self._dim_type_combo.currentData() or ""
+        nominal = self._dim_nominal.text().strip()
+        upper = self._dim_upper.text().strip()
+        lower = self._dim_lower.text().strip()
+        s = f"{prefix}{nominal}"
+        if upper != "+0.000" or lower != "-0.000":
+            # Bilateral symmetric tolerance
+            if upper.lstrip("+") == lower.lstrip("-"):
+                s += f" ±{upper.lstrip('+')}"
+            else:
+                s += f"  {upper} / {lower}"
+        return s
+
+    # ────────────────────────────────────────────────────────────────────
+    # Preview updaters
+    # ────────────────────────────────────────────────────────────────────
+
+    def _update_gdt_preview(self):
+        self._gdt_preview.setText(self._build_gdt_string())
+
+    def _update_dim_preview(self):
+        self._dim_preview.setText(self._build_dim_string())
+
+    # ────────────────────────────────────────────────────────────────────
+    # Clear
+    # ────────────────────────────────────────────────────────────────────
+
+    def _clear_gdt(self):
+        self._tol_edit.setText("0.05")
+        self._dia_btn.setChecked(False)
+        for btn in self._mod_btns.values():
+            btn.setChecked(False)
+        for edit in self._datum_edits:
+            edit.clear()
+        self._update_gdt_preview()
+
+    def _clear_dim(self):
+        self._dim_nominal.setText("0.000")
+        self._dim_upper.setText("+0.000")
+        self._dim_lower.setText("-0.000")
+        self._update_dim_preview()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Apply (emit to main window)
+    # ────────────────────────────────────────────────────────────────────
+
+    def _apply_gdt(self):
+        self.apply_description.emit(self._build_gdt_string())
+
+    def _apply_dim(self):
+        self.apply_description.emit(self._build_dim_string())
+
+    # ────────────────────────────────────────────────────────────────────
     # Public API (called by MainWindow)
-    # ------------------------------------------------------------------
+    # ────────────────────────────────────────────────────────────────────
 
     def set_balloon(self, number: int, description: str):
-        """Load a balloon's description into the editor."""
         self._balloon_label.setText(f"Editing: Balloon #{number}")
-        self._desc_edit.setPlainText(description)
-        self._apply_btn.setEnabled(True)
+        self._current_desc_label.setText(
+            f"Current: {description}" if description else ""
+        )
+        self._gdt_apply_btn.setEnabled(True)
+        self._dim_apply_btn.setEnabled(True)
 
     def clear_selection(self):
-        """Called when no balloon is selected."""
         self._balloon_label.setText("No balloon selected")
-        self._apply_btn.setEnabled(False)
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _insert(self, symbol: str):
-        """Insert symbol at the current cursor position in the text area."""
-        cursor = self._desc_edit.textCursor()
-        cursor.insertText(symbol)
-        self._desc_edit.setFocus()
-
-    def _on_apply(self):
-        self.apply_description.emit(self._desc_edit.toPlainText())
+        self._current_desc_label.setText("")
+        self._gdt_apply_btn.setEnabled(False)
+        self._dim_apply_btn.setEnabled(False)
