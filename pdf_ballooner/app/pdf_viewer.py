@@ -6,7 +6,7 @@ from typing import Optional
 
 import fitz  # PyMuPDF
 from PyQt6.QtCore import pyqtSignal, Qt, QPointF, QRectF
-from PyQt6.QtGui import QImage, QPainter, QPixmap, QTransform, QWheelEvent, QKeyEvent
+from PyQt6.QtGui import QImage, QMouseEvent, QPainter, QPixmap, QTransform, QWheelEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
 )
@@ -65,6 +65,10 @@ class PDFViewer(QGraphicsView):
         self._all_balloons: dict[str, BalloonData] = {}
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
+
+        # Middle-mouse-button panning state
+        self._mid_pan_active = False
+        self._mid_pan_last: Optional[QPointF] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -147,7 +151,6 @@ class PDFViewer(QGraphicsView):
         scale_x = view_rect.width()  / rect.width()  if rect.width()  else 1
         scale_y = view_rect.height() / rect.height() if rect.height() else 1
         self._zoom = min(scale_x, scale_y)
-        self._update_balloon_scales()
         self.zoom_changed.emit(self._zoom)
 
     def fit_to_width(self):
@@ -246,7 +249,7 @@ class PDFViewer(QGraphicsView):
                 self._add_item(data)
 
     def _add_item(self, data: BalloonData):
-        item = BalloonItem(data, self._page_height, self._zoom)
+        item = BalloonItem(data, self._page_height)
         item.signals.moved.connect(self._on_balloon_moved)
         item.signals.deleted.connect(self.balloon_deleted)
         item.signals.description_changed.connect(self.balloon_desc_changed)
@@ -262,12 +265,7 @@ class PDFViewer(QGraphicsView):
         zoom = max(0.05, min(zoom, 20.0))
         self._zoom = zoom
         self.setTransform(QTransform().scale(zoom, zoom))
-        self._update_balloon_scales()
         self.zoom_changed.emit(zoom)
-
-    def _update_balloon_scales(self):
-        for item in self._balloon_items.values():
-            item.set_zoom(self._zoom)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -287,17 +285,45 @@ class PDFViewer(QGraphicsView):
         else:
             super().wheelEvent(event)
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event: QMouseEvent):
+        # Middle-mouse-button panning (works in any mode)
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._mid_pan_active = True
+            self._mid_pan_last = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if (self._mode == ViewMode.BALLOON and
                 event.button() == Qt.MouseButton.LeftButton and
                 self._doc is not None):
-            # Use position() (QPointF) for sub-pixel accuracy
             scene_pt = self.mapToScene(event.position().toPoint())
             pdf_pt = scene_to_pdf(scene_pt, self._page_height)
             self.balloon_requested.emit(pdf_pt, self._current_page)
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._mid_pan_active and self._mid_pan_last is not None:
+            delta = event.position() - self._mid_pan_last
+            self._mid_pan_last = event.position()
+            hs = self.horizontalScrollBar()
+            vs = self.verticalScrollBar()
+            hs.setValue(hs.value() - int(delta.x()))
+            vs.setValue(vs.value() - int(delta.y()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.MiddleButton and self._mid_pan_active:
+            self._mid_pan_active = False
+            self._mid_pan_last = None
+            # Restore cursor for current mode
+            self.set_mode(self._mode)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Delete:
