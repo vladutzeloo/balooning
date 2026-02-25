@@ -384,7 +384,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            export_pdf(self._pdf_path, path, list(self._balloons.values()))
+            export_pdf(self._pdf_path, path, list(self._balloons.values()),
+                       self._viewer._page_rotations)
             QMessageBox.information(self, "Done", f"Saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
