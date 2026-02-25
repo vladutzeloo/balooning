@@ -11,26 +11,64 @@ import fitz  # PyMuPDF
 from app.balloon import BalloonData
 
 
-def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> None:
+def _transform_coords(bx: float, by: float, rotation: int,
+                       w: float, h: float) -> tuple[float, float]:
+    """Map balloon coords from the viewer's rotated space to original page space.
+
+    *w* and *h* are the **original** (unrotated) page width and height.
+    """
+    if rotation == 90:
+        return (w - by, bx)
+    elif rotation == 180:
+        return (w - bx, h - by)
+    elif rotation == 270:
+        return (by, h - bx)
+    return (bx, by)
+
+
+def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData],
+               page_rotations: dict[int, int] | None = None) -> None:
     """Write a new PDF to *dst_path* with balloons drawn as vector overlays."""
     if Path(src_path).resolve() == Path(dst_path).resolve():
         raise ValueError("Cannot overwrite the original PDF. Choose a different output path.")
+
+    if page_rotations is None:
+        page_rotations = {}
 
     doc = fitz.open(src_path)
 
     for page_idx in range(len(doc)):
         page = doc[page_idx]
+        rotation = page_rotations.get(page_idx, 0) % 360
+
+        # Apply user rotation to the page so PDF viewers show it rotated.
+        if rotation:
+            page.set_rotation((page.rotation + rotation) % 360)
+
+        # Original (unrotated) page dimensions for coordinate transforms.
+        orig_w = page.mediabox.width
+        orig_h = page.mediabox.height
+
         page_balloons = [b for b in balloons if b.page == page_idx]
         if not page_balloons:
             continue
 
         shape = page.new_shape()
+        # Collect text insertions so we can draw them AFTER shape.commit(),
+        # ensuring numbers render on top of the filled circles.
+        text_items: list[tuple[fitz.Point, str, float, tuple]] = []
 
         for b in page_balloons:
-            tx = b.target_point.x()
-            ty = b.target_point.y()
-            cx = b.balloon_center.x()
-            cy = b.balloon_center.y()
+            # Transform balloon coordinates from rotated viewer space
+            # back to original page coordinate space.
+            cx, cy = _transform_coords(
+                b.balloon_center.x(), b.balloon_center.y(),
+                rotation, orig_w, orig_h,
+            )
+            tx, ty = _transform_coords(
+                b.target_point.x(), b.target_point.y(),
+                rotation, orig_w, orig_h,
+            )
             r  = b.diameter / 2.0
             style = b.style
 
@@ -81,19 +119,26 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData]) -> Non
             else:
                 shape.finish(color=circle_stroke, width=1.5, fill_opacity=0.0)
 
-            # --- Number label ---
+            # --- Collect number label for later insertion ---
             font_size = b.font_size_override if b.font_size_override > 0 else max(4.0, r * 1.1)
             text  = str(b.number)
             est_w = 0.6 * font_size * len(text)
-            page.insert_text(
+            text_items.append((
                 fitz.Point(cx - est_w / 2, cy + font_size * 0.35),
-                text,
+                text, font_size, text_color,
+            ))
+
+        # Commit all shapes (leaders, circles) to the page first.
+        shape.commit()
+
+        # Now insert text on top so numbers are visible over the circles.
+        for pt, text, font_size, color in text_items:
+            page.insert_text(
+                pt, text,
                 fontname="hebo",
                 fontsize=font_size,
-                color=text_color,
+                color=color,
             )
-
-        shape.commit()
 
     doc.save(dst_path, garbage=4, deflate=True)
     doc.close()
