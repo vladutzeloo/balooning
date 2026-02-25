@@ -88,13 +88,13 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData],
             elif style == "no_arrow":
                 leader_color  = (0.8, 0, 0)
                 circle_stroke = (0.8, 0, 0)  # red outline
-                circle_fill   = (1, 1, 1)    # white fill (not a disc)
+                circle_fill   = None          # transparent
                 text_color    = (0.8, 0, 0)  # red number
                 draw_leader   = False
             else:  # "default"
                 leader_color  = (0.8, 0, 0)
                 circle_stroke = (0, 0, 0)
-                circle_fill   = (1, 1, 1)
+                circle_fill   = None          # transparent
                 text_color    = (0, 0, 0)
                 draw_leader   = True
 
