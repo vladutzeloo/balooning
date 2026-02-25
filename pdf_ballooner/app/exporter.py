@@ -56,7 +56,8 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData],
         shape = page.new_shape()
         # Collect text insertions so we can draw them AFTER shape.commit(),
         # ensuring numbers render on top of the filled circles.
-        text_items: list[tuple[fitz.Point, str, float, tuple]] = []
+        # Each entry: (point, text, font_size, color, rotation)
+        text_items: list[tuple[fitz.Point, str, float, tuple, int]] = []
 
         for b in page_balloons:
             # Transform balloon coordinates from rotated viewer space
@@ -123,21 +124,38 @@ def export_pdf(src_path: str, dst_path: str, balloons: list[BalloonData],
             font_size = b.font_size_override if b.font_size_override > 0 else max(4.0, r * 1.1)
             text  = str(b.number)
             est_w = 0.6 * font_size * len(text)
-            text_items.append((
-                fitz.Point(cx - est_w / 2, cy + font_size * 0.35),
-                text, font_size, text_color,
-            ))
+
+            # Compute insertion point based on text rotation.
+            # When the page has user rotation, text must be pre-rotated
+            # to appear upright after the viewer applies page rotation.
+            # insert_text rotate: 0=LTR, 90=BTT, 180=RTL, 270=TTB
+            # Point meanings:
+            #   rotate=0:   bottom-left of first char
+            #   rotate=90:  bottom-right of first char
+            #   rotate=180: top-right of first char
+            #   rotate=270: top-left of first char
+            if rotation == 90:
+                pt = fitz.Point(cx + font_size * 0.35, cy + est_w / 2)
+            elif rotation == 180:
+                pt = fitz.Point(cx + est_w / 2, cy - font_size * 0.35)
+            elif rotation == 270:
+                pt = fitz.Point(cx - font_size * 0.35, cy - est_w / 2)
+            else:
+                pt = fitz.Point(cx - est_w / 2, cy + font_size * 0.35)
+
+            text_items.append((pt, text, font_size, text_color, rotation))
 
         # Commit all shapes (leaders, circles) to the page first.
         shape.commit()
 
         # Now insert text on top so numbers are visible over the circles.
-        for pt, text, font_size, color in text_items:
+        for pt, text, font_size, color, text_rot in text_items:
             page.insert_text(
                 pt, text,
                 fontname="hebo",
                 fontsize=font_size,
                 color=color,
+                rotate=text_rot,
             )
 
     doc.save(dst_path, garbage=4, deflate=True)

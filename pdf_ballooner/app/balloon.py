@@ -97,13 +97,11 @@ class BalloonItem(QGraphicsItem):
         self,
         data: BalloonData,
         page_height: float,
-        zoom: float = 1.0,
     ):
         super().__init__()
         self.signals = BalloonSignals()
         self._data = data
         self._page_height = page_height
-        self._zoom = zoom
 
         # Scene coords (Y-flipped PDF coords)
         from app.utils import pdf_to_scene
@@ -118,8 +116,6 @@ class BalloonItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setZValue(10)
-
-        self._update_scale()
 
     # ------------------------------------------------------------------
     # Properties
@@ -139,13 +135,6 @@ class BalloonItem(QGraphicsItem):
 
     def set_description(self, desc: str):
         self._data.description = desc
-
-    def set_zoom(self, zoom: float):
-        self._zoom = zoom
-        self._update_scale()
-
-    def _update_scale(self):
-        self.setScale(1.0 / self._zoom)
 
     # ------------------------------------------------------------------
     # Bounding rect (in local coords, before scale)

@@ -370,13 +370,15 @@ class GDTPanelWidget(QDockWidget):
         nominal = self._dim_nominal.text().strip()
         upper = self._dim_upper.text().strip()
         lower = self._dim_lower.text().strip()
-        s = f"{prefix}{nominal}"
+        # Append degree sign for angular dimensions
+        suffix = "°" if prefix == "∠" else ""
+        s = f"{prefix}{nominal}{suffix}"
         if upper != "+0.000" or lower != "-0.000":
             # Bilateral symmetric tolerance
             if upper.lstrip("+") == lower.lstrip("-"):
-                s += f" ±{upper.lstrip('+')}"
+                s += f" ±{upper.lstrip('+')}{suffix}"
             else:
-                s += f"  {upper} / {lower}"
+                s += f"  {upper}{suffix} / {lower}{suffix}"
         return s
 
     # ────────────────────────────────────────────────────────────────────
